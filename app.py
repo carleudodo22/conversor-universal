@@ -7,6 +7,7 @@ from threading import Timer
 import subprocess
 import os
 import zipfile
+import shutil
 
 app = Flask(__name__)
 
@@ -38,8 +39,6 @@ def apagar_arquivo(caminho):
             tamanho = os.path.getsize(caminho)
             os.remove(caminho)
             print(f"[LIMPEZA] Arquivo apagado: {caminho} | Tamanho: {tamanho} bytes")
-        else:
-            print(f"[LIMPEZA] Arquivo não encontrado ou já apagado: {caminho}")
     except Exception as erro:
         print(f"[LIMPEZA] Erro ao apagar arquivo {caminho}: {erro}")
 
@@ -49,7 +48,7 @@ def apagar_varios_arquivos(caminhos):
         apagar_arquivo(caminho)
 
 
-def apagar_arquivos_depois(caminhos, segundos=15):
+def apagar_arquivos_depois(caminhos, segundos=600):
     def tarefa_limpeza():
         print("[LIMPEZA] Iniciando limpeza programada...")
         apagar_varios_arquivos(caminhos)
@@ -57,56 +56,19 @@ def apagar_arquivos_depois(caminhos, segundos=15):
     Timer(segundos, tarefa_limpeza).start()
 
 
-def converter_midia(caminho_entrada, caminho_saida, formato_entrada, formato_saida):
-    # Vídeo para MP3
-    if formato_entrada in FORMATOS_VIDEO and formato_saida == "mp3":
-        comando = [
-            "ffmpeg",
-            "-y",
-            "-i", caminho_entrada,
-            "-vn",
-            "-acodec", "libmp3lame",
-            "-q:a", "2",
-            caminho_saida
-        ]
-
-    # Vídeo para outro formato de áudio
-    elif formato_entrada in FORMATOS_VIDEO and formato_saida in FORMATOS_AUDIO:
-        comando = [
-            "ffmpeg",
-            "-y",
-            "-i", caminho_entrada,
-            "-vn",
-            caminho_saida
-        ]
-
-    # Áudio para MP4 com tela preta
-    elif formato_entrada in FORMATOS_AUDIO and formato_saida == "mp4":
-        comando = [
-            "ffmpeg",
-            "-y",
-            "-i", caminho_entrada,
-            "-f", "lavfi",
-            "-i", "color=c=black:s=1280x720:r=30",
-            "-shortest",
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            caminho_saida
-        ]
-
-    # Conversão normal de áudio/vídeo
-    else:
-        comando = [
-            "ffmpeg",
-            "-y",
-            "-i", caminho_entrada,
-            caminho_saida
-        ]
+def rodar_ffmpeg(argumentos):
+    comando = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-nostdin",
+    ] + argumentos
 
     resultado = subprocess.run(
         comando,
-        capture_output=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True
     )
 
@@ -114,28 +76,198 @@ def converter_midia(caminho_entrada, caminho_saida, formato_entrada, formato_sai
         raise Exception("Erro no FFmpeg: " + resultado.stderr)
 
 
-def converter_imagem(caminho_entrada, caminho_saida, formato_saida):
-    imagem = Image.open(caminho_entrada)
+def codec_audio_saida(formato_saida):
+    if formato_saida == "mp3":
+        return ["-c:a", "libmp3lame", "-q:a", "2"]
 
-    # JPG/JPEG não aceita transparência
-    if formato_saida in ["jpg", "jpeg"]:
-        tem_transparencia = (
-            imagem.mode in ["RGBA", "LA"] or
-            (imagem.mode == "P" and "transparency" in imagem.info)
-        )
+    if formato_saida in ["aac", "m4a"]:
+        return ["-c:a", "aac", "-b:a", "192k"]
 
-        if tem_transparencia:
-            imagem = imagem.convert("RGBA")
-            fundo = Image.new("RGB", imagem.size, (255, 255, 255))
-            fundo.paste(imagem, mask=imagem.getchannel("A"))
-            imagem = fundo
+    if formato_saida == "ogg":
+        return ["-c:a", "libvorbis", "-q:a", "5"]
+
+    if formato_saida == "flac":
+        return ["-c:a", "flac", "-compression_level", "5"]
+
+    if formato_saida == "wav":
+        return ["-c:a", "pcm_s16le"]
+
+    return []
+
+
+def converter_midia(caminho_entrada, caminho_saida, formato_entrada, formato_saida):
+    # Saída em áudio
+    if formato_saida in FORMATOS_AUDIO:
+        argumentos = [
+            "-i", caminho_entrada,
+            "-vn",
+        ]
+
+        argumentos += codec_audio_saida(formato_saida)
+        argumentos += [
+            "-threads", "0",
+            caminho_saida
+        ]
+
+        rodar_ffmpeg(argumentos)
+        return
+
+    # Áudio para vídeo com tela preta
+    if formato_entrada in FORMATOS_AUDIO and formato_saida in FORMATOS_VIDEO:
+        if formato_saida == "webm":
+            argumentos = [
+                "-f", "lavfi",
+                "-i", "color=c=black:s=640x360:r=1",
+                "-i", caminho_entrada,
+                "-shortest",
+                "-c:v", "libvpx",
+                "-deadline", "realtime",
+                "-cpu-used", "8",
+                "-b:v", "800k",
+                "-c:a", "libvorbis",
+                "-q:a", "4",
+                caminho_saida
+            ]
+
+        elif formato_saida == "avi":
+            argumentos = [
+                "-f", "lavfi",
+                "-i", "color=c=black:s=640x360:r=1",
+                "-i", caminho_entrada,
+                "-shortest",
+                "-c:v", "mpeg4",
+                "-q:v", "5",
+                "-c:a", "libmp3lame",
+                "-q:a", "3",
+                caminho_saida
+            ]
+
         else:
-            imagem = imagem.convert("RGB")
+            argumentos = [
+                "-f", "lavfi",
+                "-i", "color=c=black:s=640x360:r=1",
+                "-i", caminho_entrada,
+                "-shortest",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "stillimage",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                "-threads", "0",
+                caminho_saida
+            ]
 
-    imagem.save(caminho_saida)
+        rodar_ffmpeg(argumentos)
+        return
+
+    # Vídeo para vídeo
+    if formato_saida in FORMATOS_VIDEO:
+        if formato_saida == "webm":
+            argumentos = [
+                "-i", caminho_entrada,
+                "-map", "0:v:0",
+                "-map", "0:a:0?",
+                "-c:v", "libvpx",
+                "-deadline", "realtime",
+                "-cpu-used", "8",
+                "-b:v", "1M",
+                "-c:a", "libvorbis",
+                "-q:a", "4",
+                caminho_saida
+            ]
+
+        elif formato_saida == "avi":
+            argumentos = [
+                "-i", caminho_entrada,
+                "-map", "0:v:0",
+                "-map", "0:a:0?",
+                "-c:v", "mpeg4",
+                "-q:v", "5",
+                "-c:a", "libmp3lame",
+                "-q:a", "3",
+                caminho_saida
+            ]
+
+        elif formato_saida in ["mp4", "mov"]:
+            argumentos = [
+                "-i", caminho_entrada,
+                "-map", "0:v:0",
+                "-map", "0:a:0?",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                "-threads", "0",
+                caminho_saida
+            ]
+
+        else:
+            argumentos = [
+                "-i", caminho_entrada,
+                "-map", "0:v:0",
+                "-map", "0:a:0?",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-threads", "0",
+                caminho_saida
+            ]
+
+        rodar_ffmpeg(argumentos)
+        return
+
+    raise Exception(f"Conversão de mídia não suportada: {formato_entrada} para {formato_saida}")
+
+
+def converter_imagem(caminho_entrada, caminho_saida, formato_saida):
+    with Image.open(caminho_entrada) as imagem:
+        # JPG/JPEG não aceita transparência
+        if formato_saida in ["jpg", "jpeg"]:
+            tem_transparencia = (
+                imagem.mode in ["RGBA", "LA"] or
+                (imagem.mode == "P" and "transparency" in imagem.info)
+            )
+
+            if tem_transparencia:
+                imagem = imagem.convert("RGBA")
+                fundo = Image.new("RGB", imagem.size, (255, 255, 255))
+                fundo.paste(imagem, mask=imagem.getchannel("A"))
+                imagem = fundo
+            else:
+                imagem = imagem.convert("RGB")
+
+            imagem.save(caminho_saida, quality=95)
+
+        elif formato_saida == "png":
+            imagem.save(caminho_saida, compress_level=1)
+
+        elif formato_saida == "webp":
+            if imagem.mode not in ["RGB", "RGBA"]:
+                imagem = imagem.convert("RGBA")
+            imagem.save(caminho_saida, quality=92, method=0)
+
+        elif formato_saida == "ico":
+            imagem.save(caminho_saida, sizes=[(256, 256)])
+
+        else:
+            imagem.save(caminho_saida)
 
 
 def converter_arquivo(caminho_entrada, caminho_saida, formato_entrada, formato_saida):
+    # Se for o mesmo formato, não converte. Só copia.
+    # Isso deixa arquivos pequenos praticamente instantâneos.
+    if formato_entrada == formato_saida:
+        shutil.copyfile(caminho_entrada, caminho_saida)
+        return
+
     # Imagem para imagem
     if formato_entrada in FORMATOS_IMAGEM and formato_saida in FORMATOS_IMAGEM:
         converter_imagem(
@@ -143,18 +275,19 @@ def converter_arquivo(caminho_entrada, caminho_saida, formato_entrada, formato_s
             caminho_saida,
             formato_saida
         )
+        return
 
     # Áudio/vídeo para áudio/vídeo
-    elif formato_entrada in (FORMATOS_AUDIO + FORMATOS_VIDEO) and formato_saida in (FORMATOS_AUDIO + FORMATOS_VIDEO):
+    if formato_entrada in (FORMATOS_AUDIO + FORMATOS_VIDEO) and formato_saida in (FORMATOS_AUDIO + FORMATOS_VIDEO):
         converter_midia(
             caminho_entrada,
             caminho_saida,
             formato_entrada,
             formato_saida
         )
+        return
 
-    else:
-        raise Exception(f"Conversão não suportada: {formato_entrada} para {formato_saida}")
+    raise Exception(f"Conversão não suportada: {formato_entrada} para {formato_saida}")
 
 
 @app.errorhandler(413)
@@ -247,13 +380,14 @@ def converter():
 
             return resposta
 
-        # Se forem vários arquivos, cria ZIP
+        # Se forem vários arquivos, cria ZIP sem compressão.
+        # Isso é mais rápido para áudio/vídeo/imagem porque eles já são comprimidos.
         caminho_zip = os.path.join(
             PASTA_CONVERTIDOS,
             f"{id_lote}_arquivos_convertidos.zip"
         )
 
-        with zipfile.ZipFile(caminho_zip, "w", zipfile.ZIP_DEFLATED) as zip_final:
+        with zipfile.ZipFile(caminho_zip, "w", zipfile.ZIP_STORED) as zip_final:
             for item in arquivos_convertidos:
                 zip_final.write(
                     item["caminho"],
